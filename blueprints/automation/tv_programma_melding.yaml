@@ -1,0 +1,151 @@
+blueprint:
+  name: TV-programma begint binnenkort
+  author: Fliha
+  description: 'Stuurt een melding (en voert eventueel extra acties uit) een aantal
+    minuten voordat een tv-programma begint. Werkt met de zender-sensoren van de [EPG-integratie](https://github.com/yohaybn/HA_EPG)
+    (open-epg.com), die het programma van vandaag en morgen als attributen `today`
+    en `tomorrow` hebben.
+
+
+    Je hoeft geen starttijd in te vullen: de blueprint zoekt het programma zelf op
+    in de gids. In de berichttekst kun je `{{ programma }}`, `{{ zender }}`, `{{ starttijd
+    }}`, `{{ minuten }}` en `{{ omschrijving }}` gebruiken.'
+  domain: automation
+  homeassistant:
+    min_version: 2024.10.0
+  source_url: https://github.com/Fliha/ha-blueprints/blob/main/blueprints/automation/tv_programma_melding.yaml
+  input:
+    programma_sectie:
+      name: Programma
+      icon: mdi:television-guide
+      input:
+        epg_sensor:
+          name: Zender
+          description: De EPG-sensor van de zender, bijvoorbeeld SBS6.
+          selector:
+            entity:
+              filter:
+              - integration: epg
+                domain:
+                - sensor
+              multiple: false
+              reorder: false
+        programma_titel:
+          name: Programmanaam
+          description: '(Een deel van) de titel. Hoofdletters maken niet uit: "bondgenoten"
+            vindt ook "De Bondgenoten".'
+          selector:
+            text:
+              multiline: false
+              multiple: false
+        minuten_vooraf:
+          name: Minuten van tevoren
+          default: 5
+          selector:
+            number:
+              min: 0.0
+              max: 120.0
+              unit_of_measurement: min
+              mode: box
+              step: 1.0
+        venster_van:
+          name: Alleen als het begint na
+          description: Handig als een programma vaker per dag wordt uitgezonden (bijv.
+            ook een herhaling 's nachts). Met 00:00 tot 00:00 geldt de hele dag.
+          default: 00:00:00
+          selector:
+            time: {}
+        venster_tot:
+          name: en vóór
+          default: 00:00:00
+          selector:
+            time: {}
+    melding_sectie:
+      name: Melding
+      icon: mdi:bell-ring
+      input:
+        melding_naar:
+          name: Melding naar
+          description: Eén of meer notify-entiteiten (bijv. iPhone). Leeg laten =
+            geen melding.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+              - domain:
+                - notify
+              reorder: false
+        titel:
+          name: Titel
+          default: "TV Tip \U0001F4FA"
+          selector:
+            text:
+              multiline: false
+              multiple: false
+        bericht:
+          name: Bericht
+          default: '{{ programma }} begint over {{ minuten }} minuten op {{ zender
+            }} ({{ starttijd }}).'
+          selector:
+            text:
+              multiline: true
+              multiple: false
+    extra_sectie:
+      name: Extra acties
+      icon: mdi:play-box-multiple
+      collapsed: true
+      input:
+        extra_acties:
+          name: Extra acties
+          description: Bijvoorbeeld de tv aanzetten op de juiste zender of een gesproken
+            melding via Sonos. De variabelen hierboven zijn ook hier te gebruiken.
+          default: []
+          selector:
+            action: {}
+mode: single
+max_exceeded: silent
+trigger_variables:
+  sensor: !input epg_sensor
+  zoek: !input programma_titel
+  minuten: !input minuten_vooraf
+  van: !input venster_van
+  tot: !input venster_tot
+triggers:
+- trigger: template
+  value_template: "{%- set nu = now().replace(second=0, microsecond=0) -%} {%- set
+    v, t = van[:5], tot[:5] -%} {%- set ns = namespace(hit=false) -%} {%- for dag,
+    extra in [('today', 0), ('tomorrow', 1)] -%}\n  {%- for tijd, prog in (state_attr(sensor,
+    dag) or {}).items() -%}\n    {%- if zoek | lower in (prog.title | default('')
+    | lower) -%}\n      {%- set start = today_at(tijd) + timedelta(days=extra) -%}\n
+    \     {%- set hm = start.strftime('%H:%M') -%}\n      {%- set in_venster = (v
+    == t) or (v < t and v <= hm < t)\n                           or (v > t and (hm
+    >= v or hm < t)) -%}\n      {%- if in_venster and start - timedelta(minutes=minuten
+    | int) == nu -%}\n        {%- set ns.hit = true -%}\n      {%- endif -%}\n    {%-
+    endif -%}\n  {%- endfor -%}\n{%- endfor -%} {{ ns.hit }}"
+variables:
+  melding_naar: !input melding_naar
+  gevonden: "{%- set doel = now().replace(second=0, microsecond=0) + timedelta(minutes=minuten
+    | int) -%} {%- set ns = namespace(p={}) -%} {%- for dag, extra in [('today', 0),
+    ('tomorrow', 1)] -%}\n  {%- for tijd, prog in (state_attr(sensor, dag) or {}).items()
+    -%}\n    {%- if zoek | lower in (prog.title | default('') | lower)\n          and
+    today_at(tijd) + timedelta(days=extra) == doel -%}\n      {%- set ns.p = prog
+    -%}\n    {%- endif -%}\n  {%- endfor -%}\n{%- endfor -%} {{ ns.p }}"
+  programma: '{{ gevonden.title | default(zoek) }}'
+  omschrijving: '{{ gevonden.desc | default('''') }}'
+  starttijd: '{{ gevonden.start | default('''') }}'
+  zender: '{{ state_attr(sensor, ''channel_display_name'') or state_attr(sensor, ''friendly_name'')
+    }}'
+actions:
+- if:
+  - condition: template
+    value_template: '{{ melding_naar | count > 0 }}'
+  then:
+  - action: notify.send_message
+    target:
+      entity_id: !input melding_naar
+    data:
+      title: !input titel
+      message: !input bericht
+- choose: []
+  default: !input extra_acties
