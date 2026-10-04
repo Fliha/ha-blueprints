@@ -1,0 +1,165 @@
+blueprint:
+  name: TV program starting soon
+  author: Fliha
+  description: >-
+    Sends a notification (and optionally runs extra actions) a number of minutes
+    before a TV program starts. Works with the channel sensors of the
+    [EPG integration](https://github.com/yohaybn/HA_EPG) (open-epg.com), which
+    provide today's and tomorrow's schedule as the attributes `today` and `tomorrow`.
+
+
+    No start time needed: the blueprint looks the program up in the guide itself.
+    In the message you can use `{{ program }}`, `{{ channel }}`, `{{ start_time }}`,
+    `{{ minutes }}` and `{{ description }}`.
+  domain: automation
+  homeassistant:
+    min_version: 2024.10.0
+  source_url: https://github.com/Fliha/ha-blueprints/blob/main/blueprints/automation/tv_program_notification.yaml
+  input:
+    program_section:
+      name: Program
+      icon: mdi:television-guide
+      input:
+        epg_sensor:
+          name: Channel
+          description: The EPG sensor of the channel, e.g. BBC One.
+          selector:
+            entity:
+              filter:
+              - integration: epg
+                domain:
+                - sensor
+              multiple: false
+              reorder: false
+        program_title:
+          name: Program name
+          description: >-
+            (Part of) the title, case-insensitive: "news" also matches "BBC News at Ten".
+          selector:
+            text:
+              multiline: false
+              multiple: false
+        minutes_before:
+          name: Minutes in advance
+          default: 5
+          selector:
+            number:
+              min: 0
+              max: 120
+              unit_of_measurement: min
+              mode: box
+              step: 1
+        window_from:
+          name: Only if it starts after
+          description: >-
+            Useful when a program airs several times a day (e.g. a repeat at night).
+            00:00 to 00:00 means the whole day.
+          default: "00:00:00"
+          selector:
+            time: {}
+        window_to:
+          name: and before
+          default: "00:00:00"
+          selector:
+            time: {}
+    notification_section:
+      name: Notification
+      icon: mdi:bell-ring
+      input:
+        notify_targets:
+          name: Notify
+          description: One or more notify entities (e.g. a phone). Leave empty for no notification.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+              - domain:
+                - notify
+              reorder: false
+        title:
+          name: Title
+          default: "TV Tip 📺"
+          selector:
+            text:
+              multiline: false
+              multiple: false
+        message:
+          name: Message
+          default: "{{ program }} starts in {{ minutes }} minutes on {{ channel }} ({{ start_time }})."
+          selector:
+            text:
+              multiline: true
+              multiple: false
+    extra_section:
+      name: Extra actions
+      icon: mdi:play-box-multiple
+      collapsed: true
+      input:
+        extra_actions:
+          name: Extra actions
+          description: >-
+            For example turn on the TV on the right channel or a spoken announcement.
+            The variables above can be used here too.
+          default: []
+          selector:
+            action: {}
+mode: single
+max_exceeded: silent
+trigger_variables:
+  sensor: !input epg_sensor
+  search: !input program_title
+  minutes: !input minutes_before
+  from_time: !input window_from
+  to_time: !input window_to
+triggers:
+- trigger: template
+  value_template: |-
+    {%- set now_min = now().replace(second=0, microsecond=0) -%}
+    {%- set v, t = from_time[:5], to_time[:5] -%}
+    {%- set ns = namespace(hit=false) -%}
+    {%- for day, extra in [('today', 0), ('tomorrow', 1)] -%}
+      {%- for tm, prog in (state_attr(sensor, day) or {}).items() -%}
+        {%- if search | lower in (prog.title | default('') | lower) -%}
+          {%- set start = today_at(tm) + timedelta(days=extra) -%}
+          {%- set hm = start.strftime('%H:%M') -%}
+          {%- set in_window = (v == t) or (v < t and v <= hm < t)
+                              or (v > t and (hm >= v or hm < t)) -%}
+          {%- if in_window and start - timedelta(minutes=minutes | int) == now_min -%}
+            {%- set ns.hit = true -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+    {%- endfor -%}
+    {{ ns.hit }}
+variables:
+  notify_targets: !input notify_targets
+  found: |-
+    {%- set target = now().replace(second=0, microsecond=0) + timedelta(minutes=minutes | int) -%}
+    {%- set ns = namespace(p={}) -%}
+    {%- for day, extra in [('today', 0), ('tomorrow', 1)] -%}
+      {%- for tm, prog in (state_attr(sensor, day) or {}).items() -%}
+        {%- if search | lower in (prog.title | default('') | lower)
+              and today_at(tm) + timedelta(days=extra) == target -%}
+          {%- set ns.p = prog -%}
+        {%- endif -%}
+      {%- endfor -%}
+    {%- endfor -%}
+    {{ ns.p }}
+  program: "{{ found.title | default(search) }}"
+  description: "{{ found.desc | default('') }}"
+  start_time: "{{ found.start | default('') }}"
+  channel: "{{ state_attr(sensor, 'channel_display_name') or state_attr(sensor, 'friendly_name') }}"
+actions:
+- if:
+  - condition: template
+    value_template: "{{ notify_targets | count > 0 }}"
+  then:
+  - action: notify.send_message
+    target:
+      entity_id: !input notify_targets
+    data:
+      title: !input title
+      message: !input message
+- choose: []
+  default: !input extra_actions
